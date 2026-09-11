@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Desktop Cat
 
 A local Linux desktop companion built with Python, PySide6, and QPainter. It
@@ -53,3 +54,7 @@ ignore the request to sit behind application windows; this is a compositor
 policy limitation, not a Python rendering limitation. The app still switches
 its topmost hint and remains click-through except while the spicy cat is under
 the cursor.
+=======
+# useless_project
+this is made for useless projects hackathon
+>>>>>>> 4f546602f5853540bd18168c6789863ef90af565
