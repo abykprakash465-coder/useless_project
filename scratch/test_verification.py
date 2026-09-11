@@ -256,30 +256,44 @@ class TestDesktopCat(unittest.TestCase):
 
         cat.close()
 
-    def test_floor_level_icon_rejection(self):
+    def test_floor_level_icon_interaction(self):
         frames = load_frames(None, 160, 160, 4, 5, 0.72)
         cat = DesktopCat(frames, [])
         floor = float(cat.height() - cat.CAT_HEIGHT)
-        cat.pos_x = 1780.0
+        cat.pos_x = 598.0
         cat.pos_y = floor
         cat.vy = 0.0
 
-        # Floor icon at x=1789, y=965 (like abywebbuild)
+        # Floor icon at x=598, y=965 (like program)
         floor_item = DesktopItem(
-            name="abywebbuild",
-            icon_rect=QRect(1789, 965, 120, 106),
-            cat_pos=QPoint(1789, 920),
+            name="program",
+            icon_rect=QRect(598, 965, 120, 106),
+            cat_pos=QPoint(598, 920),
             atime=100.0,
-            platform=QRect(1779, 1045, 140, 20),
+            platform=QRect(588, 1045, 140, 20),
         )
         cat.items = [floor_item]
         cat.behavior_state = "WANDER"
-        cat.target_x = 500.0  # Walking left
+        cat.target_x = 700.0
 
-        # Step physics - cat should NOT enter INTERACT_ITEM
+        # Run several physics steps to trigger interaction (75% chance per passing)
+        interacted = False
+        for _ in range(30):
+            cat.advance_physics(0.016)
+            if cat.behavior_state == "INTERACT_ITEM" and cat.target_item == floor_item:
+                interacted = True
+                break
+
+        self.assertTrue(interacted)
+        # Verify it approaches and stops beside the item without flying
         cat.advance_physics(0.05)
+        self.assertEqual(cat.vy, 0.0)
+
+        # Complete interaction and verify cooldown is applied
+        cat.behavior_timer = 0.0
+        cat.advance_physics(0.016)
         self.assertEqual(cat.behavior_state, "WANDER")
-        self.assertNotEqual(cat.behavior_state, "INTERACT_ITEM")
+        self.assertGreater(cat.item_cooldowns.get("program", 0), 10.0)
 
         cat.close()
 
