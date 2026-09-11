@@ -1,11 +1,12 @@
 import os
 import sys
+import math
+import unittest
 from pathlib import Path
 
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import unittest
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtWidgets import QApplication
 
@@ -111,27 +112,24 @@ class TestDesktopCat(unittest.TestCase):
         # Test 150px Proximity in SPICY mood
         cat.eating_pause_timer = 0.0
         cat.set_mood(Mood.SPICY)
-        # Position cursor within 100px of cat
-        cat.x, cat.y = 200.0, 500.0
-        # Simulating cursor offset
-        cursor_local = QPoint(280, 520) # ~80px away horizontally
-        # Advance physics when cursor is nearby
-        dx = cursor_local.x() - (cat.x + cat.CAT_WIDTH / 2)
+        cat.pos_x, cat.pos_y = 200.0, 500.0
+        cursor_local = QPoint(280, 520)
+        dx = cursor_local.x() - (cat.pos_x + cat.CAT_WIDTH / 2)
         dist = math.hypot(dx, 0)
         self.assertLess(dist, 150.0)
 
-        # Test resting on oldest item
+        # Test resting on oldest item when reached
         test_item = DesktopItem(
             name="OldDoc",
             icon_rect=QRect(200, 500, 120, 106),
             cat_pos=QPoint(200, 500),
             atime=100.0,
-            platform=QRect(190, 580, 140, 20)
+            platform=QRect(190, 580, 140, 20),
         )
         cat.items = [test_item]
-        cat.time_alive = 65.0 # Greater than 60s
+        cat.time_alive = 65.0  # Greater than 60s
+        cat.pos_x, cat.pos_y = 200.0, 500.0  # Placed directly on item
         cat.advance_physics(0.1)
-        # Cat should be on or approaching the item
         self.assertEqual(cat.animation, Animation.NAP)
         self.assertGreater(cat.rest_nap_timer, 0.0)
 
@@ -154,13 +152,13 @@ class TestDesktopCat(unittest.TestCase):
         cat = DesktopCat(frames, ["100,400,200,20"])
 
         # Cat right above the platform
-        cat.x = 150.0
-        cat.y = float(platform.top() - cat.CAT_HEIGHT - 5)
+        cat.pos_x = 150.0
+        cat.pos_y = float(platform.top() - cat.CAT_HEIGHT - 5)
         cat.vy = 1200.0  # High descent velocity that would normally tunnel
 
         cat.apply_gravity(0.04, 1080.0)
         # Should have cleanly landed on top of platform
-        self.assertEqual(cat.y, float(platform.top() - cat.CAT_HEIGHT))
+        self.assertEqual(cat.pos_y, float(platform.top() - cat.CAT_HEIGHT))
         self.assertEqual(cat.vy, 0.0)
 
         cat.close()
@@ -169,12 +167,12 @@ class TestDesktopCat(unittest.TestCase):
         frames = load_frames(None, 160, 160, 4, 5, 0.72)
         cat = DesktopCat(frames, [])
         floor = float(cat.height() - cat.CAT_HEIGHT)
-        cat.y = floor
+        cat.pos_y = floor
         cat.vy = 0.0
         cat.eating_pause_timer = 0.0
 
         # Treat on floor near the cat
-        treat_x = cat.x + cat.CAT_WIDTH / 2
+        treat_x = cat.pos_x + cat.CAT_WIDTH / 2
         treat_y = float(cat.height() - 20)
         cat.treats = [Treat(x=treat_x, y=treat_y, vy=0.0)]
 
@@ -188,8 +186,8 @@ class TestDesktopCat(unittest.TestCase):
     def test_parabolic_jump_horizontal_momentum(self):
         frames = load_frames(None, 160, 160, 4, 5, 0.72)
         cat = DesktopCat(frames, [])
-        cat.x = 100.0
-        cat.y = 800.0
+        cat.pos_x = 100.0
+        cat.pos_y = 800.0
         cat.vy = 0.0
         cat.jump_cooldown = 0.0
 
@@ -198,7 +196,7 @@ class TestDesktopCat(unittest.TestCase):
             icon_rect=QRect(350, 400, 120, 106),
             cat_pos=QPoint(350, 400),
             atime=50.0,
-            platform=QRect(340, 480, 140, 20)
+            platform=QRect(340, 480, 140, 20),
         )
         cat.items = [target_item]
         cat.behavior_state = "INTERACT_ITEM"
@@ -214,7 +212,136 @@ class TestDesktopCat(unittest.TestCase):
 
         cat.close()
 
+    def test_pick_wander_target_right_edge_bias(self):
+        frames = load_frames(None, 160, 160, 4, 5, 0.72)
+        cat = DesktopCat(frames, [])
+        max_x = float(cat.width() - cat.CAT_WIDTH)
+
+        # When at the right edge
+        cat.pos_x = max_x
+        for _ in range(50):
+            tgt = cat.pick_wander_target()
+            # Must be biased toward left/center (<= max_x * 0.55)
+            self.assertLessEqual(tgt, max_x * 0.55 + 1.0)
+            self.assertGreaterEqual(tgt, 150.0)
+
+        # When at the left edge
+        cat.pos_x = 0.0
+        for _ in range(50):
+            tgt = cat.pick_wander_target()
+            # Must be biased toward right/center (>= max_x * 0.45)
+            self.assertGreaterEqual(tgt, max_x * 0.45 - 1.0)
+            self.assertLessEqual(tgt, max_x - 150.0)
+
+        cat.close()
+
+    def test_right_boundary_active_bounce(self):
+        frames = load_frames(None, 160, 160, 4, 5, 0.72)
+        cat = DesktopCat(frames, [])
+        max_x = float(cat.width() - cat.CAT_WIDTH)
+        floor = float(cat.height() - cat.CAT_HEIGHT)
+
+        # Force cat past right boundary
+        cat.pos_x = max_x + 10.0
+        cat.vx = cat.WALK_SPEED
+        cat.behavior_state = "WANDER"
+
+        cat.apply_gravity(0.016, floor)
+
+        # Cat should be clamped, velocity negative, facing left, target inwards
+        self.assertEqual(cat.pos_x, max_x)
+        self.assertLess(cat.vx, 0.0)
+        self.assertEqual(cat.facing, -1)
+        self.assertLessEqual(cat.target_x, max_x * 0.55 + 1.0)
+
+        cat.close()
+
+    def test_floor_level_icon_rejection(self):
+        frames = load_frames(None, 160, 160, 4, 5, 0.72)
+        cat = DesktopCat(frames, [])
+        floor = float(cat.height() - cat.CAT_HEIGHT)
+        cat.pos_x = 1780.0
+        cat.pos_y = floor
+        cat.vy = 0.0
+
+        # Floor icon at x=1789, y=965 (like abywebbuild)
+        floor_item = DesktopItem(
+            name="abywebbuild",
+            icon_rect=QRect(1789, 965, 120, 106),
+            cat_pos=QPoint(1789, 920),
+            atime=100.0,
+            platform=QRect(1779, 1045, 140, 20),
+        )
+        cat.items = [floor_item]
+        cat.behavior_state = "WANDER"
+        cat.target_x = 500.0  # Walking left
+
+        # Step physics - cat should NOT enter INTERACT_ITEM
+        cat.advance_physics(0.05)
+        self.assertEqual(cat.behavior_state, "WANDER")
+        self.assertNotEqual(cat.behavior_state, "INTERACT_ITEM")
+
+        cat.close()
+
+    def test_tower_cooldown_prevents_repetition(self):
+        frames = load_frames(None, 160, 160, 4, 5, 0.72)
+        cat = DesktopCat(frames, [])
+        floor = float(cat.height() - cat.CAT_HEIGHT)
+        cat.pos_x = 1789.0
+        cat.pos_y = floor
+        cat.vy = 0.0
+
+        elevated_item = DesktopItem(
+            name="ElevatedFile",
+            icon_rect=QRect(1789, 700, 120, 106),
+            cat_pos=QPoint(1789, 655),
+            atime=100.0,
+            platform=QRect(1779, 780, 140, 20),
+        )
+        cat.items = [elevated_item]
+        cat.behavior_state = "WANDER"
+        cat.target_x = 500.0
+
+        # Set tower cooldown at x=1789
+        cat.last_interacted_x = 1789.0
+        cat.tower_cooldown = 30.0
+
+        # Even if passing the icon, tower cooldown prevents interaction
+        for _ in range(10):
+            cat.advance_physics(0.016)
+            self.assertEqual(cat.behavior_state, "WANDER")
+
+        cat.close()
+
+    def test_patrol_rest_seek_timeout(self):
+        frames = load_frames(None, 160, 160, 4, 5, 0.72)
+        cat = DesktopCat(frames, [])
+        floor = float(cat.height() - cat.CAT_HEIGHT)
+        cat.pos_x = 1789.0
+        cat.pos_y = floor
+
+        unreachable_item = DesktopItem(
+            name="Unreachable",
+            icon_rect=QRect(1789, 100, 120, 106),
+            cat_pos=QPoint(1789, 50),
+            atime=10.0,
+            platform=QRect(1779, 180, 140, 20),
+        )
+        cat.items = [unreachable_item]
+        cat.time_alive = 65.0
+        cat.rest_seek_timer = 20.5  # Exceeded 20 seconds timeout
+
+        cat.advance_physics(0.016)
+
+        # Must abort seeking, reset time_alive, switch to WANDER, target interior
+        self.assertEqual(cat.time_alive, 0.0)
+        self.assertEqual(cat.rest_seek_timer, 0.0)
+        self.assertEqual(cat.behavior_state, "WANDER")
+        max_x = float(cat.width() - cat.CAT_WIDTH)
+        self.assertLessEqual(cat.target_x, max_x * 0.55 + 1.0)
+
+        cat.close()
+
 
 if __name__ == "__main__":
-    import math
     unittest.main()

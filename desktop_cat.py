@@ -336,6 +336,11 @@ class DesktopCat(QWidget):
         self.is_dragging = False
         self.drag_offset = QPoint()
         self.last_dirty_rect = QRect()
+        self.last_interacted_item: DesktopItem | None = None
+        self.item_cooldown = 0.0
+        self.last_interacted_x: float | None = None
+        self.tower_cooldown = 0.0
+        self.rest_seek_timer = 0.0
 
         # Transparent, topmost, click-through overlay window
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -487,6 +492,22 @@ class DesktopCat(QWidget):
         if not self.scanner.isRunning():
             self.scanner.start()
 
+    def pick_wander_target(self) -> float:
+        max_x = float(self.width() - self.CAT_WIDTH)
+        if self.pos_x > max_x * 0.70:
+            # Near right screen edge: strongly bias back toward screen center/left
+            return random.uniform(150.0, max_x * 0.55)
+        elif self.pos_x < max_x * 0.30:
+            # Near left screen edge: strongly bias back toward screen center/right
+            return random.uniform(max_x * 0.45, max_x - 150.0)
+        else:
+            # In middle zone: wide wander range with minimum displacement
+            tgt = self.pos_x + random.uniform(-500.0, 500.0)
+            tgt = max(80.0, min(tgt, max_x - 80.0))
+            if abs(tgt - self.pos_x) < 60:
+                tgt += 150 if self.pos_x < max_x / 2 else -150
+            return max(80.0, min(tgt, max_x - 80.0))
+
     def reset_position(self) -> None:
         screen = QApplication.primaryScreen().geometry()
         self.pos_x = (screen.width() - self.CAT_WIDTH) / 2.0
@@ -494,13 +515,15 @@ class DesktopCat(QWidget):
         self.vx = 0.0
         self.vy = 0.0
         self.behavior_state = "WANDER"
+        self.target_x = self.pick_wander_target()
         self.behavior_timer = 2.0
         self.animation = Animation.SIT
         self.say("Meow! I'm back!", 2.0)
 
     def on_desktop_items_scanned(self, items: list[DesktopItem]) -> None:
         self.items = items
-        item_platforms = [it.platform for it in items]
+        floor = float(self.height() - self.CAT_HEIGHT)
+        item_platforms = [it.platform for it in items if it.platform.top() < floor - 30]
         self.platforms = list(self.manual_platforms) + item_platforms
 
     def say(self, text: str, life: float = 3.0) -> None:
@@ -589,6 +612,10 @@ class DesktopCat(QWidget):
         self.time_alive += dt
         self.telemetry_tick += dt
         self.rescan_timer += dt
+        if self.item_cooldown > 0:
+            self.item_cooldown = max(0.0, self.item_cooldown - dt)
+        if self.tower_cooldown > 0:
+            self.tower_cooldown = max(0.0, self.tower_cooldown - dt)
 
         # Particles & Effects logic
         for heart in list(self.hearts):
@@ -771,53 +798,60 @@ class DesktopCat(QWidget):
 
             # After 60 seconds of patrol, seek out the unused file to rest
             if self.time_alive > 60.0 and unused_item:
-                dx = unused_item.cat_pos.x() - self.pos_x
-                dy = unused_item.cat_pos.y() - self.pos_y
-
-                if abs(dy) < 60 and abs(dx) < 25:
-                    self.vx = 0.0
-                    self.animation = Animation.NAP
-                    if self.rest_nap_timer <= 0:
-                        self.rest_nap_timer = 12.0
-                        self.say(f"Napping on {unused_item.name}... 💤", 3.0)
-                    else:
-                        self.rest_nap_timer -= dt
-                        if self.rest_nap_timer <= 0:
-                            # Finished rest cycle, wake up and reset
-                            self.time_alive = 0.0
-                            self.stretch_timer = 1.5
-                            self.animation = Animation.STRETCH
-                            self.behavior_state = "WANDER"
-                            self.behavior_timer = 3.0
+                self.rest_seek_timer += dt
+                # If struggling to reach for > 20s, give up, reset and wander
+                if self.rest_seek_timer > 20.0:
+                    self.time_alive = 0.0
+                    self.rest_seek_timer = 0.0
+                    self.behavior_state = "WANDER"
+                    self.target_x = self.pick_wander_target()
+                    self.behavior_timer = 4.0
                 else:
-                    if abs(dx) > 20 and self.vy == 0:
-                        self.move_x(dx, dt, speed_mult=mood_speed * 1.1)
-                    else:
-                        if self.vy == 0 and self.jump_cooldown <= 0:
-                            height_diff = max(0.0, self.pos_y - unused_item.cat_pos.y())
-                            required_vy = -math.sqrt(
-                                2 * self.GRAVITY * max(10, height_diff + 20)
-                            )
-                            self.vy = max(-1500.0, required_vy)
-                            self.animation = Animation.JUMP
-                            self.jump_cooldown = 1.0
+                    dx = unused_item.cat_pos.x() - self.pos_x
+                    dy = unused_item.cat_pos.y() - self.pos_y
 
-                            # Horizontal velocity for parabolic arc
-                            time_to_apex = abs(self.vy) / self.GRAVITY
-                            flight_time = time_to_apex * 1.6
-                            jump_vx = dx / max(0.2, flight_time)
-                            max_jump_speed = self.WALK_SPEED * mood_speed * 1.5
-                            self.vx = max(-max_jump_speed, min(max_jump_speed, jump_vx))
-                            self.facing = 1 if self.vx >= 0 else -1
+                    if abs(dy) < 60 and abs(dx) < 25:
+                        self.vx = 0.0
+                        self.animation = Animation.NAP
+                        if self.rest_nap_timer <= 0:
+                            self.rest_nap_timer = 12.0
+                            self.say(f"Napping on {unused_item.name}... 💤", 3.0)
+                        else:
+                            self.rest_nap_timer -= dt
+                            if self.rest_nap_timer <= 0:
+                                # Finished rest cycle, wake up and reset
+                                self.time_alive = 0.0
+                                self.rest_seek_timer = 0.0
+                                self.stretch_timer = 1.5
+                                self.animation = Animation.STRETCH
+                                self.behavior_state = "WANDER"
+                                self.target_x = self.pick_wander_target()
+                                self.behavior_timer = 3.0
+                    else:
+                        if abs(dx) > 20 and self.vy == 0:
+                            self.move_x(dx, dt, speed_mult=mood_speed * 1.1)
+                        else:
+                            if self.vy == 0 and self.jump_cooldown <= 0:
+                                height_diff = max(0.0, self.pos_y - unused_item.cat_pos.y())
+                                required_vy = -math.sqrt(
+                                    2 * self.GRAVITY * max(10, height_diff + 20)
+                                )
+                                self.vy = max(-1500.0, required_vy)
+                                self.animation = Animation.JUMP
+                                self.jump_cooldown = 1.0
+
+                                # Horizontal velocity for parabolic arc
+                                time_to_apex = abs(self.vy) / self.GRAVITY
+                                flight_time = time_to_apex * 1.6
+                                jump_vx = dx / max(0.2, flight_time)
+                                max_jump_speed = self.WALK_SPEED * mood_speed * 1.5
+                                self.vx = max(-max_jump_speed, min(max_jump_speed, jump_vx))
+                                self.facing = 1 if self.vx >= 0 else -1
 
             else:
                 if self.behavior_state == "WANDER":
                     if self.behavior_timer <= 0:
-                        wander_range = 350 if self.mood is Mood.SPICY else 220
-                        self.target_x = self.pos_x + random.uniform(-wander_range, wander_range)
-                        self.target_x = max(
-                            0.0, min(self.target_x, float(self.width() - self.CAT_WIDTH))
-                        )
+                        self.target_x = self.pick_wander_target()
                         wander_time = (
                             random.uniform(2.0, 5.0)
                             if self.mood is Mood.SPICY
@@ -833,14 +867,21 @@ class DesktopCat(QWidget):
                         # Check if walking past a platform/icon we can jump on
                         if self.vy == 0:
                             for item in self.items:
+                                if item == self.last_interacted_item and self.item_cooldown > 0:
+                                    continue
+                                if self.tower_cooldown > 0 and self.last_interacted_x is not None:
+                                    if abs(item.cat_pos.x() - self.last_interacted_x) < 60:
+                                        continue
                                 if abs(self.pos_x - item.cat_pos.x()) < 30:
                                     height_diff = self.pos_y - item.cat_pos.y()
-                                    if 40 < height_diff < 250:
-                                        self.behavior_state = "INTERACT_ITEM"
-                                        self.target_item = item
-                                        self.behavior_timer = random.uniform(5.0, 10.0)
-                                        self.vx = 0.0
-                                        break
+                                    # Must be genuinely elevated above cat, not at floor level
+                                    if 60 < height_diff < 350 and item.platform.top() < floor - 30:
+                                        if random.random() < 0.20:
+                                            self.behavior_state = "INTERACT_ITEM"
+                                            self.target_item = item
+                                            self.behavior_timer = random.uniform(5.0, 10.0)
+                                            self.vx = 0.0
+                                            break
                     else:
                         self.vx = 0.0
                         self.animation = Animation.SIT
@@ -881,7 +922,13 @@ class DesktopCat(QWidget):
                                     self.facing = 1 if self.vx >= 0 else -1
 
                     if self.behavior_timer <= 0:
+                        self.last_interacted_item = self.target_item
+                        self.item_cooldown = 20.0
+                        if self.target_item:
+                            self.last_interacted_x = float(self.target_item.cat_pos.x())
+                            self.tower_cooldown = 30.0
                         self.behavior_state = "WANDER"
+                        self.target_x = self.pick_wander_target()
                         self.behavior_timer = 0.0
 
         self.apply_gravity(dt, floor)
@@ -901,7 +948,7 @@ class DesktopCat(QWidget):
         else:
             self.vx = 0.0
 
-        if dy < -45 and self.vy == 0 and self.jump_cooldown <= 0:
+        if dy < -45 and self.vy >= 0 and self.jump_cooldown <= 0:
             self.vy = self.get_mood_jump_velocity()
             self.animation = Animation.JUMP
             self.jump_cooldown = 0.8
@@ -927,15 +974,22 @@ class DesktopCat(QWidget):
             self.pos_y = 0.0
             self.vy = max(0.0, self.vy)
 
-        # Screen boundaries
+        # Screen boundaries with active interior bounce
+        max_x = float(self.width() - self.CAT_WIDTH)
         if self.pos_x <= 0:
             self.pos_x = 0.0
-            self.vx *= -1
-            self.facing = 1 if self.vx >= 0 else -1
-        elif self.pos_x >= self.width() - self.CAT_WIDTH:
-            self.pos_x = float(self.width() - self.CAT_WIDTH)
-            self.vx *= -1
-            self.facing = 1 if self.vx >= 0 else -1
+            self.vx = abs(self.vx) if self.vx != 0 else self.WALK_SPEED
+            self.facing = 1
+            if self.behavior_state == "WANDER":
+                self.target_x = self.pick_wander_target()
+                self.behavior_timer = random.uniform(3.0, 6.0)
+        elif self.pos_x >= max_x:
+            self.pos_x = max_x
+            self.vx = -abs(self.vx) if self.vx != 0 else -self.WALK_SPEED
+            self.facing = -1
+            if self.behavior_state == "WANDER":
+                self.target_x = self.pick_wander_target()
+                self.behavior_timer = random.uniform(3.0, 6.0)
 
         # Platform collisions (continuous swept collision)
         curr_feet = self.pos_y + self.CAT_HEIGHT
