@@ -1,0 +1,3 @@
+#!/bin/bash
+pkill -f "desktop_cat.py"
+echo "Desktop cat has been stopped! 🐈💤"
